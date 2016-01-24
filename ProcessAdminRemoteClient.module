@@ -1,0 +1,298 @@
+<?php
+
+/**
+* Remote Administration Client module
+* Add basic remote management functionality to a ProcessWire installation, works in combination with Admin Remote Server on the management server.
+* ToDo: Create an endpoint template and set up an endpoint page named uniquely for the configured server.
+* Development stage: pre-alpha
+*
+* @author BitPoet
+*
+* https://github.com/bitpoet/ProcessAdminRemoteClient
+* Created 23 January 2016
+* 
+* ProcessWire 2.x
+* Copyright (C) 2011 by Ryan Cramer
+* Licensed under GNU/GPL v2, see LICENSE.TXT
+*
+* http://www.processwire.com
+*
+*/
+
+
+class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
+	public static function getModuleInfo() {
+		return array(
+			'title'			=>	__('Remote Administration Client', __FILE__),
+			'summary'		=>	__('Remotely administer this server through the Admin Remote Server module on a central management server', __FILE__),
+			'version'		=>	'0.0.5',
+			'installs'		=>	array('AdminRemoteClientListener'),
+		);
+	}
+
+	/**
+	 * Construct module
+	 */
+	public function __construct() {
+		$this->arsserverip = '';
+		$this->arsserversecret = '';
+		$this->arsserverurl = '';
+		$this->arcclientsecret = '';
+		$this->arclastping = '';
+	}
+	
+	/**
+	 * Initialize module
+	 */
+	public function init() {
+		return parent::init();
+	}
+
+	/**
+	 * Basic interface for process to lists and add clients
+	 *
+	 * @return string HTML
+	 */
+	public function ___execute() {
+		$post = $this->input->post;
+		
+		if( $post->arcconnectserver ) {
+			$this->connectServer($this->arsserverurl, $this->arsserversecret, $this->arcclientsecret);
+		}
+		
+		if( $post->arcsetconfig && $post->arcjson ) {
+			$importdata = json_decode($post->arcjson);
+			if( is_object($importdata) ) {
+				if( $importdata->IP && $importdata->S_SECRET && $importdata->S_URL ) {
+					$cfgdata = $this->modules->getModuleConfigData($this->className());
+					$cfgdata["arsserverip"] = $importdata->IP;
+					$cfgdata["arsserversecret"] = $importdata->S_SECRET;
+					$cfgdata["arsserverurl"] = $importdata->S_URL;
+					$cfgdata["arcclientsecret"] = '';
+					$this->modules->saveModuleConfigData($this->className(), $cfgdata);
+					
+					$this->session->message("Configuration imported");
+				} else {
+					$this->session->error($this->_("Missing configuration values, unable to import!"));
+				}
+			} else {
+				$this->session->error($this->_("Invalid configuration data, unable to import!"));
+			}
+			$this->session->redirect($this->page->url);
+		}
+		
+		$form = new InputfieldForm();
+		$form->method = 'post';
+		$form->url = './';
+		$form->label = $this->_("Server configuration");
+
+		$mrk = new InputfieldMarkup();
+
+		$tbl = new MarkupAdminDataTable();
+		$tbl->setSortable(false); 
+		$tbl->setEncodeEntities(false);
+		$tbl->headerRow(array(
+			$this->_("Setting"),
+			$this->_("Value")
+		));
+		
+		$tbl->row(array("<a href='{$this->config->urls->admin}module/edit?name={$this->className()}'>" . $this->_("Server IP") . "</a>", $this->arsserverip));
+		$tbl->row(array($this->_("Server URL"), $this->arsserverurl));
+		$tbl->row(array($this->_("Server secret"), $this->arsserversecret));
+		$tbl->row(array($this->_("Client secret"), $this->arcclientsecret));
+		$tbl->row(array($this->_("Last ping from server"), $this->arclastping));			
+		
+		$mrk->attr('value', $tbl->render());
+		$form->append($mrk);
+				
+		$fld = new InputfieldTextarea();
+		$fld->attr('id+name', "arcjson");
+		$fld->label = $this->_("JSON configuration to import");
+		$fld->description = $this->_("Paste the configuration exported on the management server here. You only need to do this once on each client! Click 'Connect/refresh server' afterwards to initialize the connection.");
+		$fld->attr('cols', 80);
+		$fld->rows = 5;
+		$fld->collapsed = Inputfield::collapsedYes;
+		$form->append($fld);
+		
+		$fld = new InputfieldButton();
+		$fld->attr('name+id', "arcsetconfig");
+		$fld->attr('value', $this->_("Import config"));
+		$form->append($fld);
+		
+		if( $this->arsserverurl && $this->arsserversecret && $this->arsserverip ) {
+			$fld = new InputfieldButton();
+			$fld->attr('name+id', "arcconnectserver");
+			$fld->attr('value', $this->_("Connect/refresh server"));
+			$form->append($fld);
+		}
+
+		$this->getMoreExecuteParts($form);
+		
+		return $form->render();
+	}
+
+	/**
+	 * Extension hook
+	 */
+	public function ___getMoreExecuteParts(&$form) {
+		/* Make modifications / additions to $form through a hook here */
+	}
+	
+	/**
+	 * Connect to server, update ping timestamp
+	 *
+	 */
+	public function ___connectServer($url, $ssecret, $csecret) {
+		$http = new WireHttp();
+		$firsttime = false;
+		if( ! $csecret ) {
+			$firsttime = true;
+			$csecret = uniqid("ARC", true);
+		}
+		try {
+			if( $firsttime ) {
+				$params = array("srv" => $ssecret, "cli" => $csecret, "arcaction" => "initclient", "url" => $this->pages->get('/')->httpUrl);
+			} else {
+				$params = array("srv" => $ssecret, "arcaction" => "ping");
+			}
+			$ret = json_decode($http->post($url . microtime() . "/", $params), true);
+		} catch( Expection $e ) {
+			$this->session->error(sprintf($this->_("Invalid response from management server: %s"), $e->getMessage()));
+			$this->session->redirect($this->page->url);
+		}
+		if( ! is_array($ret) || ! array_key_exists("success", $ret) ) {
+			$this->session->error($this->_("Invalid or empty response from server"));
+			$this->session->redirect($this->page->url);
+		}
+		if( $ret["success"] != true ) {
+			$this->session->error(sprintf($this->_("Request returned error: %s"), $ret["message"]));
+			$this->session->redirect($this->page->url);
+		}
+		if( $ret["cli"] != $csecret ) {
+			$this->session->error($this->_("Server returned invalid client secret"));
+			$this->session->redirect($this->page->url);
+		}
+
+		if( $firstTime )
+			$this->saveModuleConfigField("arcclientsecret", $csecret);
+		$this->saveModuleConfigField("arclastping", strftime("%Y-%m-%d %H:%M:%S"));
+		$this->session->message("Successfully contacted server");
+		$this->session->redirect($this->page->url);
+	}
+
+	/**
+	 * Convenience function to update settings in a module's configuration. Either pass it a field name and a value, or an associative array of field names and their values.
+	 */
+	protected function saveModuleConfigField($fname, $fvalue = '') {
+		$cfgdata = $this->modules->getModuleConfigData($this->className());
+		if( is_array($fname) ) {
+			foreach( $fname as $k => $v ) {
+				$cfgdata[$k] = $v;
+			}
+		} else {
+			$cfgdata[$fname] = $fvalue;
+		}
+		$this->modules->saveModuleConfigData($this->className(), $cfgdata);
+	}
+
+	/**
+	 * Build configuration form, store public IP in module configuration
+	 *
+	 * @return InputfieldWrapper
+	 */
+	public function getModuleConfigInputfields() {
+		$wrap = new InputfieldWrapper();
+		
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arsserverip");
+		$fld->size = 15;
+		$fld->label = $this->_("Public IP address of this server");
+		$fld->value = $this->arsserverip;
+		$wrap->append($fld);
+		
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arsserverurl");
+		$fld->size = 80;
+		$fld->label = $this->_("Server base URL (populated automatically)");
+		$fld->value = $this->arsserverurl;
+		$fld->collapsed = Inputfield::collapsedNoLocked;
+		$wrap->append($fld);
+
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arsserversecret");
+		$fld->size = 80;
+		$fld->label = $this->_("Server secret (populated automatically)");
+		$fld->value = $this->arsserversecret;
+		$fld->collapsed = Inputfield::collapsedNoLocked;
+		$wrap->append($fld);
+
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arcclientsecret");
+		$fld->size = 80;
+		$fld->label = $this->_("Client secret (generated automatically)");
+		$fld->value = $this->arcclientsecret;
+		$fld->collapsed = Inputfield::collapsedNoLocked;
+		$wrap->append($fld);
+		
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arclastping");
+		$fld->size = 25;
+		$fld->label = $this->_("Last ping from server (populated automatically)");
+		$fld->value = $this->arclastping;
+		$fld->collapsed = Inputfield::collapsedNoLocked;
+		$wrap->append($fld);
+
+		return $wrap;
+	}
+
+	/**
+	 * Install remote management pages
+	 */
+	public function ___install() {
+		//if( $this->modules->get("ProcessAdminRemoteServer") )
+		//	throw new WireException($this->_("ProcessAdminRemoteServer already installed. Cannot run client and server module on the same server."));
+		
+		$admin = $this->pages->get('/admin/');
+		
+		$apage = $this->pages->get('name=arsremoteadmin');
+		if( $apage instanceof NullPage ) {
+			$apage = new Page();
+			$apage->template = $this->templates->get('admin');
+			$apage->parent = $admin;
+			$apage->title = $this->_("Remote Admin");
+			$apage->name = "arsremoteadmin";
+			$apage->process = "ProcessList";
+			$apage->addStatus(Page::statusLocked);
+			$apage->save();
+		}
+
+		$mpage = new Page();
+		$mpage->template = $this->templates->get('admin');
+		$mpage->parent = $apage;
+		$mpage->title = $this->_("Central Server");
+		$mpage->name = "arccentralserver";
+		$mpage->process = "ProcessAdminRemoteClient";
+		$mpage->addStatus(Page::statusLocked);
+		$mpage->save();
+	}
+	
+	/**
+	 * Uninstall remote management pages
+	 */
+	public function ___uninstall() {
+		$pg = $this->pages->get('name=arsmanageclients');
+		if( ! $pg instanceof NullPage ) {
+			$pg->removeStatus(Page::statusLocked);
+			$pg->save();
+			$this->pages->delete($pg);
+		}
+
+		$pg = $this->pages->get('name=arsremoteadmin');
+		if( ! $pg instanceof NullPage && $pg->numChildren == 0 ) {
+			$pg->removeStatus(Page::statusLocked);
+			$pg->save();
+			$this->pages->delete($pg);
+		}
+	}
+}
+

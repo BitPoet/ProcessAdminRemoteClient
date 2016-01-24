@@ -1,0 +1,113 @@
+<?php
+
+/**
+* Remote Administration Client Listener
+* Listens for connections from the remote management server. Only works in conjunction with ProcessAdminRemoteClient.
+* You can add custom actions by hooking into AdminRemoteClientListener::moreActions, checking $input->post->arcaction and modifying $origevent.
+* ToDo: Use more PW functionality for JSON handling.
+* ToDo: Validate server ip against value stored in ProcessAdminRemoteClient's module configuration.
+* ToDo: Avoid hooking into ProcessPageView::execute generically. Have ProcessAdminRemoteClient create an endpoint template
+*       that we can use with 'autoload' => 'template=endpointtemplate' and set up a page with a connection-unique naming.
+* Development stage: pre-alpha
+*
+* @author BitPoet
+*
+* https://github.com/bitpoet/ProcessAdminRemoteClient
+* Created 23 January 2016
+* 
+* ProcessWire 2.x
+* Copyright (C) 2011 by Ryan Cramer
+* Licensed under GNU/GPL v2, see LICENSE.TXT
+*
+* http://www.processwire.com
+*
+*/
+
+class AdminRemoteClientListener extends WireData implements Module {
+	public static function getModuleInfo() {
+		return array(
+			'title'			=>	__('Remote Administration Client Listener', __FILE__),
+			'summary'		=>	__('Sets up a listener for connections from the management server', __FILE__),
+			'version'		=>	'0.0.3',
+			'autoload'		=>	true,
+		);
+	}
+	
+	public function __construct() {
+		$this->addHookBefore('ProcessPageView::execute', $this, 'processManagementConnection');
+	}
+	
+	public function processManagementConnection($event) {
+		// ToDo: Check server IP
+		$post = $this->input->post;
+		$cfg = $this->modules->getModuleConfigData("ProcessAdminRemoteClient");
+		if( $_SERVER["REQUEST_METHOD"] != "POST" || ! $post->cli || ! $post->arsaction ) {
+			return;
+		}
+		if( $post->cli != $cfg["arcclientsecret"] ) {
+			$this->log->message("Invalid client secret");
+			return;
+		}
+		if( $post->arsaction == "ping" ) {
+			$event->return = json_encode(array("success" => true, "srv" => $cfg["arsserversecret"]));
+			$event->replace = true;
+		} else if( $post->arsaction == "status" ) {
+			$this->wire->user = $this->users->get('admin');
+			$status = $this->getStatus();
+			$status["success"] = true;
+			$status["srv"] = $cfg["arsserversecret"];
+			$status["base"]["ip"] = $cfg["arsserverip"];
+			$event->return = json_encode($status);
+			$event->replace = true;
+		} else if( $this->moreActions($event, $cfg) == false ) {
+			$event->return = json_encode(array("success" => "false", "message" => "Unknown action"));
+			$event->replace = true;
+		}
+		header("Content-Type: application/json"); 
+		return $event;
+	}
+
+	public function ___moreActions($origevent, $cfg) {
+		// Just to be extendable
+		return false;
+	}
+	
+	/**
+	 * Get server information, module versions and config settings. Currently ignores nested config items and hides db password and auth salt.
+	 */
+	public function getStatus() {
+		$mods = array();
+		foreach( $this->modules as $mod ) {
+			$name = $mod->className();
+			$info = $this->modules->getModuleInfoVerbose($name);
+			if($info['core']) continue;
+			$mods[$name] = array(
+				"title"				=>	$info["title"],
+				'version'			=>	$this->modules->formatVersion($info["version"])
+			);
+		}
+		$data = array(
+			"base"		=>	array(
+				"version"			=> $this->config->version,
+				'url'				=>	$this->pages->get('/')->httpUrl,
+				'adminurl'			=>	$this->pages->get($this->config->adminRootPageID)->httpUrl
+			),
+			"modules"	=>	$mods,
+			"config"	=>	array_filter($this->config->getArray(), function($k,$v) { return (! is_array($v) || count($v) > 0) ? true : false; }, ARRAY_FILTER_USE_BOTH)
+		);
+		$data["config"]["dbPass"] = "**********";
+		$data["config"]["userAuthSalt"] = "**********";
+		ksort($data);
+		ksort($data["modules"]);
+		ksort($data["config"]);
+		return $this->moreStatus($data);
+	}
+	
+	/**
+	 * Append to the returned status information through this hook
+	 */
+	public function ___moreStatus(&$data) {
+		/* Just to be extendable */
+	}
+}
+
