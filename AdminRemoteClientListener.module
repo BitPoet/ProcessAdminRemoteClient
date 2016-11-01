@@ -5,7 +5,6 @@
 * Listens for connections from the remote management server. Only works in conjunction with ProcessAdminRemoteClient.
 * You can add custom actions by hooking into AdminRemoteClientListener::moreActions, checking $input->post->arcaction and modifying $origevent.
 * ToDo: Use more PW functionality for JSON handling.
-* ToDo: Validate server ip against value stored in ProcessAdminRemoteClient's module configuration.
 * ToDo: Avoid hooking into ProcessPageView::execute generically. Have ProcessAdminRemoteClient create an endpoint template
 *       that we can use with 'autoload' => 'template=endpointtemplate' and set up a page with a connection-unique naming.
 * Development stage: pre-alpha
@@ -28,7 +27,7 @@ class AdminRemoteClientListener extends WireData implements Module {
 		return array(
 			'title'			=>	__('Remote Administration Client Listener', __FILE__),
 			'summary'		=>	__('Sets up a listener for connections from the management server', __FILE__),
-			'version'		=>	'0.0.3',
+			'version'		=>	'0.0.7',
 			'autoload'		=>	true,
 		);
 	}
@@ -38,19 +37,23 @@ class AdminRemoteClientListener extends WireData implements Module {
 	}
 	
 	public function processManagementConnection($event) {
-		// ToDo: Check server IP
 		$post = $this->input->post;
 		$cfg = $this->modules->getModuleConfigData("ProcessAdminRemoteClient");
-		if( $_SERVER["REQUEST_METHOD"] != "POST" || ! $post->cli || ! $post->arsaction ) {
+		if( PHP_SAPI == "cli" || $_SERVER["REQUEST_METHOD"] != "POST" || ! $post->cli || ! $post->arsaction ) {
 			return;
 		}
-		if( $post->cli != $cfg["arcclientsecret"] ) {
-			$this->log->message("Invalid client secret");
-			return;
-		}
-		if( $post->arsaction == "ping" ) {
+		if( $_SERVER["REMOTE_ADDR"] != $cfg["arsserverip"] ) {
+			$event->return = json_encode(array("success" => false, "message" => $this->_("Invalid remote server IP")));
+			$event->replace = true;
+			
+		} else if( $post->cli != $cfg["arcclientsecret"] ) {
+			$event->return = json_encode(array("success" => false, "message" => $this->_("Invalid client secret")));
+			$event->replace = true;
+			
+		} else if( $post->arsaction == "ping" ) {
 			$event->return = json_encode(array("success" => true, "srv" => $cfg["arsserversecret"]));
 			$event->replace = true;
+			
 		} else if( $post->arsaction == "status" ) {
 			$this->wire->user = $this->users->get('admin');
 			$status = $this->getStatus();
@@ -59,10 +62,13 @@ class AdminRemoteClientListener extends WireData implements Module {
 			$status["base"]["ip"] = $cfg["arsserverip"];
 			$event->return = json_encode($status);
 			$event->replace = true;
+			
 		} else if( $this->moreActions($event, $cfg) == false ) {
 			$event->return = json_encode(array("success" => "false", "message" => "Unknown action"));
 			$event->replace = true;
+			
 		}
+		
 		header("Content-Type: application/json"); 
 		return $event;
 	}
@@ -77,28 +83,42 @@ class AdminRemoteClientListener extends WireData implements Module {
 	 */
 	public function getStatus() {
 		$mods = array();
-		foreach( $this->modules as $mod ) {
-			$name = $mod->className();
+		$core = array();
+		foreach( array_merge($this->wire('cache')->get('Modules.info'), $this->wire('cache')->get('ModulesUninstalled.info')) as $mod ) {
+			$name = $mod["name"];
 			$info = $this->modules->getModuleInfoVerbose($name);
-			if($info['core']) continue;
-			$mods[$name] = array(
-				"title"				=>	$info["title"],
-				'version'			=>	$this->modules->formatVersion($info["version"])
-			);
+			if($info['core']) {
+				$core[$name] = array(
+					"title"				=>	$info["title"],
+					'version'			=>	$this->modules->formatVersion($info["version"]),
+					"installed"			=>	$info["installed"]
+				);
+			} else {
+				$mods[$name] = array(
+					"title"				=>	$info["title"],
+					'version'			=>	$this->modules->formatVersion($info["version"]),
+					"installed"			=>	$info["installed"]
+				);
+			}
 		}
+		
 		$data = array(
 			"base"		=>	array(
 				"version"			=> $this->config->version,
 				'url'				=>	$this->pages->get('/')->httpUrl,
 				'adminurl'			=>	$this->pages->get($this->config->adminRootPageID)->httpUrl
 			),
-			"modules"	=>	$mods,
+			"sitemodules"	=>	$mods,
+			"coremodules"	=>	$core,
 			"config"	=>	array_filter($this->config->getArray(), function($k,$v) { return (! is_array($v) || count($v) > 0) ? true : false; }, ARRAY_FILTER_USE_BOTH)
 		);
+		
 		$data["config"]["dbPass"] = "**********";
 		$data["config"]["userAuthSalt"] = "**********";
+		
 		ksort($data);
-		ksort($data["modules"]);
+		ksort($data["sitemodules"]);
+		ksort($data["coremodules"]);
 		ksort($data["config"]);
 		return $this->moreStatus($data);
 	}
@@ -106,8 +126,9 @@ class AdminRemoteClientListener extends WireData implements Module {
 	/**
 	 * Append to the returned status information through this hook
 	 */
-	public function ___moreStatus(&$data) {
+	public function ___moreStatus($data) {
 		/* Just to be extendable */
+		return $data;
 	}
 }
 

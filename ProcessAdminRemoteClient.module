@@ -25,7 +25,7 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 		return array(
 			'title'			=>	__('Remote Administration Client', __FILE__),
 			'summary'		=>	__('Remotely administer this server through the Admin Remote Server module on a central management server', __FILE__),
-			'version'		=>	'0.0.5',
+			'version'		=>	'0.0.7',
 			'installs'		=>	array('AdminRemoteClientListener'),
 		);
 	}
@@ -35,6 +35,7 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 	 */
 	public function __construct() {
 		$this->arsserverip = '';
+		$this->arcclientname = '';
 		$this->arsserversecret = '';
 		$this->arsserverurl = '';
 		$this->arcclientsecret = '';
@@ -57,7 +58,7 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 		$post = $this->input->post;
 		
 		if( $post->arcconnectserver ) {
-			$this->connectServer($this->arsserverurl, $this->arsserversecret, $this->arcclientsecret);
+			$this->connectServer($this->arsserverurl, $this->arsserversecret, $this->arcclientname, $this->arcclientsecret);
 		}
 		
 		if( $post->arcsetconfig && $post->arcjson ) {
@@ -66,6 +67,7 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 				if( $importdata->IP && $importdata->S_SECRET && $importdata->S_URL ) {
 					$cfgdata = $this->modules->getModuleConfigData($this->className());
 					$cfgdata["arsserverip"] = $importdata->IP;
+					$cfgdata["arcclientname"] = $importdata->C_NAME;
 					$cfgdata["arsserversecret"] = $importdata->S_SECRET;
 					$cfgdata["arsserverurl"] = $importdata->S_URL;
 					$cfgdata["arcclientsecret"] = '';
@@ -99,6 +101,7 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 		$tbl->row(array("<a href='{$this->config->urls->admin}module/edit?name={$this->className()}'>" . $this->_("Server IP") . "</a>", $this->arsserverip));
 		$tbl->row(array($this->_("Server URL"), $this->arsserverurl));
 		$tbl->row(array($this->_("Server secret"), $this->arsserversecret));
+		$tbl->row(array($this->_("Client name"), $this->arcclientname));
 		$tbl->row(array($this->_("Client secret"), $this->arcclientsecret));
 		$tbl->row(array($this->_("Last ping from server"), $this->arclastping));			
 		
@@ -134,7 +137,7 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 	/**
 	 * Extension hook
 	 */
-	public function ___getMoreExecuteParts(&$form) {
+	public function ___getMoreExecuteParts($form) {
 		/* Make modifications / additions to $form through a hook here */
 	}
 	
@@ -142,20 +145,25 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 	 * Connect to server, update ping timestamp
 	 *
 	 */
-	public function ___connectServer($url, $ssecret, $csecret) {
-		$http = new WireHttp();
+	public function ___connectServer($url, $ssecret, $cname, $csecret) {
+		$url .= "?v=" . str_replace(array('.', ' '), '', microtime()) . "/";
+		$httpcli = new WireHttp();
 		$firsttime = false;
+
 		if( ! $csecret ) {
 			$firsttime = true;
 			$csecret = uniqid("ARC", true);
 		}
+
 		try {
 			if( $firsttime ) {
-				$params = array("srv" => $ssecret, "cli" => $csecret, "arcaction" => "initclient", "url" => $this->pages->get('/')->httpUrl);
+				$params = array("srv" => $ssecret, "cname" => $cname, "cli" => $csecret, "arcaction" => "initclient", "url" => $this->pages->get('/')->httpUrl);
 			} else {
-				$params = array("srv" => $ssecret, "arcaction" => "ping");
+				$params = array("srv" => $ssecret, "cname" => $cname, "arcaction" => "ping");
 			}
-			$ret = json_decode($http->post($url . microtime() . "/", $params), true);
+
+			$txt = $httpcli->post($url, $params);
+			$ret = json_decode($txt, true);
 		} catch( Expection $e ) {
 			$this->session->error(sprintf($this->_("Invalid response from management server: %s"), $e->getMessage()));
 			$this->session->redirect($this->page->url);
@@ -173,8 +181,9 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 			$this->session->redirect($this->page->url);
 		}
 
-		if( $firstTime )
+		if( $firsttime ) {
 			$this->saveModuleConfigField("arcclientsecret", $csecret);
+		}
 		$this->saveModuleConfigField("arclastping", strftime("%Y-%m-%d %H:%M:%S"));
 		$this->session->message("Successfully contacted server");
 		$this->session->redirect($this->page->url);
@@ -233,6 +242,15 @@ class ProcessAdminRemoteClient extends Process implements ConfigurableModule {
 		$fld->value = $this->arcclientsecret;
 		$fld->collapsed = Inputfield::collapsedNoLocked;
 		$wrap->append($fld);
+
+		$fld = $this->modules->get("InputfieldText");
+		$fld->attr('id+name', "arcclientname");
+		$fld->size = 80;
+		$fld->label = $this->_("Client name (populated automatically)");
+		$fld->value = $this->arcclientname;
+		$fld->collapsed = Inputfield::collapsedNoLocked;
+		$wrap->append($fld);
+
 		
 		$fld = $this->modules->get("InputfieldText");
 		$fld->attr('id+name', "arclastping");
